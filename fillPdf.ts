@@ -3,7 +3,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import type { FieldMap, FieldSpec } from "./fieldMap";
+import type { FieldMap, FieldSpec } from "./fieldMap.ts";
 
 type FillOptions = {
   fontPath?: string;         // optional custom TTF
@@ -118,14 +118,12 @@ export async function fillFieldsInPlace(
 
   const targetPath = outputPdfPath ?? inputPdfPath;
 
-  const tmpPath = path.join(
-    os.tmpdir(),
-    `filled-${path.basename(targetPath)}-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`
-  );
+await fs.mkdir(path.dirname(targetPath), { recursive: true });
 
-  await fs.writeFile(tmpPath, outBytes);
+const tmpPath = path.join(
+  path.dirname(targetPath),
+  `.${path.basename(targetPath)}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`
+);
 
-  // Ensure destination dir exists if writing elsewhere
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.rename(tmpPath, targetPath);
-}
+await fs.writeFile(tmpPath, outBytes);
+await fs.rename(tmpPath, targetPath);}
