@@ -1,47 +1,51 @@
-// fillPdf.ts
-import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts, type PDFFont } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
-import type { FieldMap, FieldSpec } from "./fieldMap.ts";
 
-type FillOptions = {
-  fontPath?: string;         // optional custom TTF
-  defaultFontSize?: number;
-  textColor?: { r: number; g: number; b: number };
+/** Extend your FieldSpec with these RTL-related fields */
+export type FieldSpec = {
+  pageIndex: number;
+  x: number;
+  y: number;
+
+  width?: number;
+  height?: number;
+
+  fontSize?: number;
+  lineHeight?: number;
+
+  align?: "left" | "center" | "right";
+  maxFontSize?: number;
+  minFontSize?: number;
+
+  clearBackground?: boolean;
+
+  /** "rtl" for Hebrew fields, "ltr" otherwise. "auto" tries to detect Hebrew. */
+  direction?: "ltr" | "rtl" | "auto";
 };
 
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
+export type FieldMap = Record<string, FieldSpec>;
 
-function computeX(spec: FieldSpec, textWidth: number) {
-  const width = spec.width ?? 0;
-  const align = spec.align ?? "left";
-  if (!width || align === "left") return spec.x;
-  if (align === "center") return spec.x + (width - textWidth) / 2;
-  return spec.x + (width - textWidth);
-}
+export type FillOptions = {
+  /** Path to a .ttf/.otf font that supports Hebrew (required for Hebrew text). */
+  fontPath?: string;
 
-/**
- * Simple auto-fit: shrink font size until text fits spec.width (if provided).
- */
-function fitFontSize(font: any, text: string, spec: FieldSpec, fallbackSize: number) {
-  const width = spec.width;
-  if (!width) return fallbackSize;
+  defaultFontSize?: number;
 
-  const maxSize = spec.maxFontSize ?? fallbackSize;
-  const minSize = spec.minFontSize ?? 6;
+  /** 0..1 floats */
+  textColor?: { r: number; g: number; b: number };
 
-  let size = maxSize;
-  while (size > minSize) {
-    const w = font.widthOfTextAtSize(text, size);
-    if (w <= width) return size;
-    size -= 0.5;
-  }
-  return minSize;
-}
+  /** Auto-detect RTL if FieldSpec.direction is not set (default true). */
+  autoDetectRtl?: boolean;
 
+  /**
+   * If true, for RTL fields with a width, defaults align to "right" when align is missing.
+   * (default true)
+   */
+  defaultRtlAlignRight?: boolean;
+};
+
+/** Main function */
 export async function fillFieldsToNewPdfBytes(
   inputPdfBytes: Uint8Array,
   fields: Record<string, string>,
@@ -50,80 +54,213 @@ export async function fillFieldsToNewPdfBytes(
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(inputPdfBytes);
 
-  // Font: either custom TTF or a standard one
-  let font;
+  // === Font setup ===
+  let font: PDFFont;
   if (options.fontPath) {
+    // Needed for embedding custom fonts (TTF/OTF)
+    pdfDoc.registerFontkit(fontkit);
     const fontBytes = await fs.readFile(options.fontPath);
     font = await pdfDoc.embedFont(fontBytes);
   } else {
+    // Fine for Latin, NOT for Hebrew glyph coverage
     font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   }
 
-  const color = options.textColor ?? { r: 0, g: 0, b: 0 };
-  const textRgb = rgb(color.r, color.g, color.b);
+  // === Color ===
+  const c = options.textColor ?? { r: 0, g: 0, b: 0 };
+  const textColor = rgb(c.r, c.g, c.b);
 
-  for (const [fieldName, value] of Object.entries(fields)) {
+  const autoDetectRtl = options.autoDetectRtl ?? true;
+  const defaultRtlAlignRight = options.defaultRtlAlignRight ?? true;
+
+  for (const [fieldName, rawValue] of Object.entries(fields)) {
     const spec = fieldMap[fieldName];
-    if (!spec) {
+    if (!spec)
       throw new Error(`Unknown field "${fieldName}" (no mapping found).`);
-    }
 
     const page = pdfDoc.getPage(spec.pageIndex);
 
-    const baseFontSize = spec.fontSize ?? options.defaultFontSize ?? 12;
-    const fontSize = fitFontSize(font, value, spec, baseFontSize);
+    // Decide direction
+    const direction =
+      spec.direction ??
+      (autoDetectRtl && containsHebrew(rawValue) ? "rtl" : "ltr");
 
-    // Optionally clear the area first (useful if template has faint pre-filled text)
+    // Default align for RTL fields if width exists and align not provided
+    const align =
+      spec.align ??
+      (direction === "rtl" && defaultRtlAlignRight && spec.width
+        ? "right"
+        : "left");
+
+    const baseFontSize = spec.fontSize ?? options.defaultFontSize ?? 12;
+
+    // Convert text to what we will actually draw
+    // (pdf-lib does not implement bidi layout)
+    const rendered =
+      direction === "rtl"
+        ? rawValue // RTL behaves like old LTR (no visual reordering)
+        : direction === "ltr" && containsHebrew(rawValue)
+        ? rtlVisualize(rawValue) // LTR behaves like old RTL for Hebrew only
+        : rawValue; // normal LTR for non-Hebrew text
+    // Support multi-line values (manual newlines)
+    const lines = rendered.split(/\r?\n/);
+
+    // Fit font size to widest line (if width given)
+    const fittedFontSize = fitFontSizeToWidth(font, lines, spec, baseFontSize);
+
+    // Optional background clear (use provided height, else estimate)
     if (spec.clearBackground && (spec.width || spec.height)) {
+      const bgWidth = spec.width ?? maxLineWidth(font, lines, fittedFontSize);
+      const bgHeight =
+        spec.height ??
+        estimateBlockHeight(lines.length, fittedFontSize, spec.lineHeight);
+
       page.drawRectangle({
         x: spec.x,
-        y: spec.y - (spec.height ?? fontSize * 1.2),
-        width: spec.width ?? font.widthOfTextAtSize(value, fontSize),
-        height: spec.height ?? fontSize * 1.35,
+        y: spec.y - bgHeight + fittedFontSize * 0.2, // small baseline tweak
+        width: bgWidth,
+        height: bgHeight,
         color: rgb(1, 1, 1),
         borderColor: rgb(1, 1, 1),
       });
     }
 
-    const textWidth = font.widthOfTextAtSize(value, fontSize);
-    const x = computeX(spec, textWidth);
+    // Draw each line; first line uses spec.y, next lines go down
+    const lineHeight = spec.lineHeight ?? fittedFontSize * 1.2;
 
-    page.drawText(value, {
-      x,
-      y: spec.y,
-      size: fontSize,
-      font,
-      color: textRgb,
-      lineHeight: spec.lineHeight,
-    });
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const y = spec.y - i * lineHeight;
+
+      const lineWidth = font.widthOfTextAtSize(line, fittedFontSize);
+      const x = computeAlignedX(spec.x, spec.width, align, lineWidth);
+
+      page.drawText(line, {
+        x,
+        y,
+        size: fittedFontSize,
+        font,
+        color: textColor,
+      });
+    }
   }
 
   return await pdfDoc.save();
 }
 
+/* =========================
+ * Helpers
+ * ========================= */
+
+function containsHebrew(s: string) {
+  // Hebrew block (including niqqud marks range)
+  return /[\u0590-\u05FF]/.test(s);
+}
+
 /**
- * Your “duplicate then replace” workflow, done safely:
- * - write result to a temp file
- * - then rename into place (atomic on most OSes)
+ * Practical RTL for Hebrew in PDFs:
+ * - Split into runs: Hebrew, Latin/digits, and "other" punctuation/spaces
+ * - Reverse the run order (RTL)
+ * - Reverse graphemes inside Hebrew runs (keeps niqqud attached)
+ * - Keep Latin/digits runs as-is (so 2025, ABC stay readable)
+ *
+ * This is not a full Unicode BiDi implementation, but works well for common form fields.
+ */
+function rtlVisualize(input: string) {
+  // Fast path: if it's entirely Hebrew-ish (plus spaces/punct), just reverse graphemes
+  if (/^[\u0590-\u05FF\s.,\-–—"'\(\)\[\]\/\\:;!?0-9]+$/.test(input)) {
+    return reverseGraphemes(input);
+  }
+
+  const tokens = input.match(
+    /[\u0590-\u05FF]+|[A-Za-z0-9]+|[^\u0590-\u05FFA-Za-z0-9]+/g
+  );
+  if (!tokens) return input;
+
+  const processed = tokens.map((t) =>
+    /[\u0590-\u05FF]/.test(t) ? reverseGraphemes(t) : t
+  );
+
+  return processed.reverse().join("");
+}
+
+function reverseGraphemes(s: string) {
+  // Node 18+ usually supports Intl.Segmenter.
+  // If not available, fall back to naive split (less correct for combining marks).
+  const Seg = (Intl as any).Segmenter;
+  if (!Seg) return s.split("").reverse().join("");
+
+  const seg = new Seg("he", { granularity: "grapheme" });
+  const parts = Array.from(seg.segment(s), (x: any) => x.segment);
+  return parts.reverse().join("");
+}
+
+function computeAlignedX(
+  x: number,
+  width: number | undefined,
+  align: "left" | "center" | "right",
+  textWidth: number
+) {
+  if (!width || align === "left") return x;
+  if (align === "center") return x + (width - textWidth) / 2;
+  return x + (width - textWidth);
+}
+
+function fitFontSizeToWidth(
+  font: PDFFont,
+  lines: string[],
+  spec: FieldSpec,
+  fallback: number
+) {
+  if (!spec.width) return fallback;
+
+  const maxSize = spec.maxFontSize ?? fallback;
+  const minSize = spec.minFontSize ?? 6;
+
+  let size = maxSize;
+  while (size > minSize) {
+    const widest = maxLineWidth(font, lines, size);
+    if (widest <= spec.width) return size;
+    size -= 0.5;
+  }
+  return minSize;
+}
+
+function maxLineWidth(font: PDFFont, lines: string[], fontSize: number) {
+  let max = 0;
+  for (const line of lines) {
+    const w = font.widthOfTextAtSize(line, fontSize);
+    if (w > max) max = w;
+  }
+  return max;
+}
+
+function estimateBlockHeight(
+  lineCount: number,
+  fontSize: number,
+  lineHeight?: number
+) {
+  const lh = lineHeight ?? fontSize * 1.2;
+  return Math.max(fontSize * 1.35, (lineCount - 1) * lh + fontSize * 1.35);
+}
+
+/**
+ * Convenience wrapper: read template from disk, fill it, write output to disk.
+ * This matches the API you used in example.ts.
  */
 export async function fillFieldsInPlace(
-  inputPdfPath: string,
+  inputPath: string,
   fields: Record<string, string>,
   fieldMap: FieldMap,
-  outputPdfPath?: string,
+  outputPath: string,
   options: FillOptions = {}
 ) {
-  const inBytes = await fs.readFile(inputPdfPath);
-  const outBytes = await fillFieldsToNewPdfBytes(inBytes, fields, fieldMap, options);
-
-  const targetPath = outputPdfPath ?? inputPdfPath;
-
-await fs.mkdir(path.dirname(targetPath), { recursive: true });
-
-const tmpPath = path.join(
-  path.dirname(targetPath),
-  `.${path.basename(targetPath)}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`
-);
-
-await fs.writeFile(tmpPath, outBytes);
-await fs.rename(tmpPath, targetPath);}
+  const inputBytes = await fs.readFile(inputPath);
+  const outBytes = await fillFieldsToNewPdfBytes(
+    inputBytes,
+    fields,
+    fieldMap,
+    options
+  );
+  await fs.writeFile(outputPath, outBytes);
+}

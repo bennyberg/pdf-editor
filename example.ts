@@ -1,26 +1,41 @@
 // example.ts
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { fillFieldsInPlace } from "./fillPdf.ts";
 import { fieldMap } from "./fieldMap.ts";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Resolve files relative to this script's directory (robust)
+const templatePath = path.join(__dirname, "template.pdf");
+const outputPath = path.join(__dirname, "output.pdf");
+const fontPath = path.join(__dirname, "assets", "fonts", "NotoSansHebrew-Regular.ttf");
+
 async function main() {
   await fillFieldsInPlace(
-    "template.pdf",
+    templatePath,
     {
-      // fullName: "John Doe",
-      // idNumber: "123456789",
-      // address: "10 Main St, Jerusalem",
-
-      // "firstName": { pageIndex: 0, x: 337.5, y: 639.42, fontSize: 12, clearBackground: false },
-      // "idNumber": { pageIndex: 0, x: 341.25, y: 593.17, fontSize: 12, clearBackground: false},
-      // "lastName": { pageIndex: 0, x: 338.75, y: 616.92, fontSize: 12, clearBackground: false },
-
-      firstName: "John",
-      lastName: "Doe",
+      firstName: "יוסי",
+      lastName: "יוסי",
       idNumber: "123123123",
     },
     fieldMap,
-    "output.pdf"
+    outputPath,
+    {
+      fontPath, // Hebrew-capable font
+      // optional:
+      // autoDetectRtl: true,
+      // defaultRtlAlignRight: true,
+      // textColor: { r: 0, g: 0, b: 0 },
+    }
   );
+
+  console.log("Wrote:", outputPath);
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

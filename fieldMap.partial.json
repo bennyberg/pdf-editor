@@ -1,17 +1,20 @@
 {
   "firstName": {
     "pageIndex": 0,
-    "x": 337.5,
-    "y": 639.42
+    "x": 402.84,
+    "y": 641.48,
+    "direction": "rtl"
   },
   "lastName": {
     "pageIndex": 0,
-    "x": 338.75,
-    "y": 616.92
+    "x": 398.18,
+    "y": 618.54,
+    "direction": "rtl"
   },
   "idNumber": {
     "pageIndex": 0,
-    "x": 341.25,
-    "y": 593.17
+    "x": 403.51,
+    "y": 592.81,
+    "direction": "rtl"
   }
 }
