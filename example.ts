@@ -7,8 +7,8 @@ async function main() {
     "template.pdf",
     {
       fullName: "John Doe",
-      idNumber: "123456789",
-      address: "10 Main St, Jerusalem",
+      // idNumber: "123456789",
+      // address: "10 Main St, Jerusalem",
     },
     fieldMap,
     "output.pdf"
